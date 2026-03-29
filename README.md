@@ -2,7 +2,7 @@
 
 Automatically transcribe new recordings from an Actions Ami / AK1025 MP4 player into Simplenote whenever the device is plugged in.
 
-The recorder currently mounts on this machine with a `RECORD/` directory under `/media/yongebai/L87`, so this project looks for mounted removable-media directories with supported audio files instead of assuming a single fixed label.
+The recorder currently mounts on this machine with a `RECORD/` directory under `/media/yongebai/L87`, and the script now explicitly prefers that mount path before falling back to generic removable-media discovery.
 
 ## What It Does
 
@@ -59,6 +59,12 @@ Useful flags:
 - `--backfill`: transcribe all unseen files even on the first run
 - `--mount-path /path/to/mount`: explicitly scan a mount path
 - `--limit N`: only process the first `N` unseen files
+
+If you want to force this exact mount in your `.env`, set:
+
+```env
+VOICE_MEMO_MOUNT_PATHS=/media/yongebai/L87
+```
 
 ## Automatic Sync On Plug-In
 

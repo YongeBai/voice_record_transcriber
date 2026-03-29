@@ -11,7 +11,9 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -42,6 +44,10 @@ DEFAULT_NOTE_TAG = "voice-memo"
 DEFAULT_BOOTSTRAP_THRESHOLD = 20
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_TIMEOUT_SECONDS = 1800.0
+DEFAULT_MOUNT_BASENAMES = ("L87",)
+DEFAULT_READ_RETRY_COUNT = 3
+DEFAULT_READ_RETRY_DELAY_SECONDS = 1.0
+COPY_CHUNK_SIZE = 1024 * 1024
 
 logger = logging.getLogger("voice_memo_sync")
 
@@ -153,6 +159,18 @@ def get_mount_roots() -> list[Path]:
     ]
 
 
+def preferred_mount_paths() -> list[Path]:
+    """Return preferred recorder mount paths for this device."""
+    user = get_device_user()
+    return [
+        Path(f"/media/{user}/{basename}")
+        for basename in DEFAULT_MOUNT_BASENAMES
+    ] + [
+        Path(f"/run/media/{user}/{basename}")
+        for basename in DEFAULT_MOUNT_BASENAMES
+    ]
+
+
 def get_explicit_mount_paths(cli_mount_paths: list[str] | None) -> list[Path]:
     """Return mount paths explicitly configured by CLI or env."""
     raw_paths: list[str] = []
@@ -179,7 +197,7 @@ def candidate_mount_paths(cli_mount_paths: list[str] | None) -> list[Path]:
     if explicit_paths:
         return [path for path in explicit_paths if path.exists()]
 
-    candidates: list[Path] = []
+    candidates: list[Path] = [path for path in preferred_mount_paths() if path.exists()]
     for root in get_mount_roots():
         if root.is_dir():
             child_directories = [child for child in sorted(root.iterdir()) if child.is_dir()]
@@ -380,6 +398,52 @@ def upload_audio_file(session, file_path: Path) -> str:
     return response.json()["id"]
 
 
+def stage_recording_for_upload(recording: Recording) -> Path:
+    """Copy a recording to local temporary storage before upload."""
+    retry_count = int(
+        os.getenv("VOICE_MEMO_READ_RETRY_COUNT", str(DEFAULT_READ_RETRY_COUNT))
+    )
+    retry_delay = float(
+        os.getenv(
+            "VOICE_MEMO_READ_RETRY_DELAY_SECONDS",
+            str(DEFAULT_READ_RETRY_DELAY_SECONDS),
+        )
+    )
+
+    last_error: Exception | None = None
+    for attempt in range(1, retry_count + 1):
+        temp_file = tempfile.NamedTemporaryFile(
+            prefix="voice_memo_",
+            suffix=recording.file_path.suffix,
+            delete=False,
+        )
+        temp_path = Path(temp_file.name)
+        temp_file.close()
+
+        try:
+            with recording.file_path.open("rb") as source_handle, temp_path.open(
+                "wb"
+            ) as temp_handle:
+                shutil.copyfileobj(source_handle, temp_handle, length=COPY_CHUNK_SIZE)
+            return temp_path
+        except OSError as exc:
+            last_error = exc
+            temp_path.unlink(missing_ok=True)
+            logger.warning(
+                "Failed to read %s on attempt %d/%d: %s",
+                recording.file_path,
+                attempt,
+                retry_count,
+                exc,
+            )
+            if attempt < retry_count:
+                time.sleep(retry_delay)
+
+    raise RuntimeError(
+        f"Failed to stage recording from device after {retry_count} attempts: {recording.file_path}"
+    ) from last_error
+
+
 def create_transcription(session, config: dict) -> str:
     """Start a Soniox transcription job."""
     response = session.post(
@@ -466,9 +530,11 @@ def transcribe_with_soniox(session, recording: Recording) -> str:
     """Upload, transcribe, fetch, and clean up a recording."""
     file_id: str | None = None
     transcription_id: str | None = None
+    staged_path: Path | None = None
 
     try:
-        file_id = upload_audio_file(session, recording.file_path)
+        staged_path = stage_recording_for_upload(recording)
+        file_id = upload_audio_file(session, staged_path)
         transcription_id = create_transcription(
             session, build_soniox_config(file_id, recording.note_title)
         )
@@ -489,6 +555,8 @@ def transcribe_with_soniox(session, recording: Recording) -> str:
                 delete_uploaded_file(session, file_id)
             except Exception as exc:
                 logger.warning("Failed to delete Soniox file %s: %s", file_id, exc)
+        if staged_path:
+            staged_path.unlink(missing_ok=True)
 
 
 def new_simplenote_client():
@@ -700,20 +768,33 @@ def sync_recordings(args: argparse.Namespace) -> int:
     simplenote_client = new_simplenote_client()
 
     created_notes = 0
+    failed_notes = 0
     for recording in unseen_recordings:
         logger.info("Transcribing %s", recording.file_path)
-        transcript_text = transcribe_with_soniox(soniox_session, recording)
-        note = create_simplenote_note(simplenote_client, recording, transcript_text)
-        cache["files"][recording.fingerprint] = cache_entry(
-            recording,
-            note_key=note.get("key"),
-            status="transcribed",
-        )
-        save_cache(CACHE_FILE, cache)
-        created_notes += 1
-        logger.info("Created Simplenote note %s", recording.note_title)
+        try:
+            transcript_text = transcribe_with_soniox(soniox_session, recording)
+            note = create_simplenote_note(simplenote_client, recording, transcript_text)
+            cache["files"][recording.fingerprint] = cache_entry(
+                recording,
+                note_key=note.get("key"),
+                status="transcribed",
+            )
+            save_cache(CACHE_FILE, cache)
+            created_notes += 1
+            logger.info("Created Simplenote note %s", recording.note_title)
+        except Exception as exc:
+            failed_notes += 1
+            logger.error("Failed to process %s: %s", recording.file_path, exc)
+            if not recording.mount_path.exists():
+                logger.error(
+                    "Recorder mount %s disappeared during sync. Reconnect the device and rerun the command to resume from the cache.",
+                    recording.mount_path,
+                )
+                break
 
     logger.info("Created %d new Simplenote notes.", created_notes)
+    if failed_notes:
+        logger.warning("%d recordings failed and were left unprocessed.", failed_notes)
     return 0
 
 
