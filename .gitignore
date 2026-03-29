@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.sync_cache.json
+.sync.lock
+voice_memo_sync.log

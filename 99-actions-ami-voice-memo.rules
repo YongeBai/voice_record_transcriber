@@ -1,0 +1,4 @@
+# Copy to /etc/udev/rules.d/99-actions-ami-voice-memo.rules
+# Actions Semiconductor Co., Ltd D-Wave / AK1025 MP3/MP4 Player
+# Replace yongebai in the systemd service name if needed.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="10d6", ATTR{idProduct}=="1101", TAG+="systemd", ENV{SYSTEMD_WANTS}="actions-ami-voice-memo@yongebai.service"

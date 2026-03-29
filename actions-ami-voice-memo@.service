@@ -1,0 +1,16 @@
+[Unit]
+Description=Actions Ami voice memo sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment="USER=%i"
+WorkingDirectory=/home/%i/voice_record_transcriber
+ExecStartPre=/bin/sleep 8
+ExecStart=/home/%i/voice_record_transcriber/.venv/bin/python /home/%i/voice_record_transcriber/voice_memo_sync.py
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
