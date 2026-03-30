@@ -8,7 +8,7 @@ The recorder currently mounts on this machine with a `RECORD/` directory under `
 
 - Detects mounted recorder volumes under `/media/$USER`, `/run/media/$USER`, or `/mnt`
 - Finds supported audio files such as `.wav`, `.mp3`, `.m4a`, and `.mp4`
-- Uses the Soniox async transcription API to transcribe each unseen file
+- Uses Cohere audio transcription by default, with optional Soniox support
 - Creates one Simplenote note per recording
 - Uses note titles in the format `YYYYMMDD_HHMMSS_voice_memo`
 - Keeps a local cache so each file is only processed once
@@ -35,6 +35,13 @@ The recorder currently mounts on this machine with a `RECORD/` directory under `
    ```env
    SIMPLENOTE_USER=your-email@example.com
    SIMPLENOTE_PASSWORD=your-password
+   CO_API_KEY=your-cohere-api-key
+   ```
+
+   If you want to keep using Soniox instead, set:
+
+   ```env
+   VOICE_MEMO_TRANSCRIPTION_PROVIDER=soniox
    SONIOX_API_KEY=your-soniox-api-key
    ```
 
@@ -54,7 +61,7 @@ uv run voice_memo_sync.py
 
 Useful flags:
 
-- `--dry-run`: show what would be processed without calling Soniox or Simplenote
+- `--dry-run`: show what would be processed without calling the transcriber or Simplenote
 - `--mark-existing`: add the currently mounted files to the cache without transcribing them
 - `--backfill`: transcribe all unseen files even on the first run
 - `--mount-path /path/to/mount`: explicitly scan a mount path
@@ -67,6 +74,16 @@ VOICE_MEMO_MOUNT_PATHS=/media/yongebai/L87
 ```
 
 ## Automatic Sync On Plug-In
+
+Run the helper installer:
+
+   ```bash
+   sudo ./install_auto_sync.sh
+   ```
+
+That installs the `udev` rule, installs the templated systemd service, reloads both, and enables `actions-ami-voice-memo@$(whoami).service`.
+
+If you prefer to install the pieces manually:
 
 1. Copy the `udev` rule:
 
@@ -93,7 +110,7 @@ The included rule is already wired to the detected USB IDs for this device:
 - Vendor ID: `10d6`
 - Product ID: `1101`
 
-If your Linux username is not `yongebai`, edit `99-actions-ami-voice-memo.rules` before copying it into `/etc/udev/rules.d/`.
+If your Linux username is not `yongebai`, either use `sudo ./install_auto_sync.sh <username>` or edit `99-actions-ami-voice-memo.rules` before copying it into `/etc/udev/rules.d/`.
 
 ## Environment Variables
 
@@ -101,23 +118,28 @@ Required:
 
 - `SIMPLENOTE_USER`
 - `SIMPLENOTE_PASSWORD`
-- `SONIOX_API_KEY`
+- `CO_API_KEY` by default
 
 Optional:
 
+- `VOICE_MEMO_TRANSCRIPTION_PROVIDER`: defaults to `cohere`; set to `soniox` to use Soniox instead
+- `COHERE_MODEL`: defaults to `cohere-transcribe-03-2026`
+- `COHERE_LANGUAGE`: defaults to `en`
+- `COHERE_API_KEY`: accepted as an alias for `CO_API_KEY`
 - `SONIOX_MODEL`: defaults to `stt-async-v4`
 - `SONIOX_LANGUAGE_HINTS`: comma-separated language hints like `en,es`
 - `SONIOX_CONTEXT_TEXT`: extra Soniox context
+- `SONIOX_API_KEY`: required only when `VOICE_MEMO_TRANSCRIPTION_PROVIDER=soniox`
 - `VOICE_MEMO_USER`: overrides `$USER` for removable-media mount detection
 - `VOICE_MEMO_MOUNT_PATHS`: comma-separated explicit mount paths
 - `VOICE_MEMO_TAG`: Simplenote tag, default `voice-memo`
 - `VOICE_MEMO_BOOTSTRAP_THRESHOLD`: first-run backlog threshold, default `20`
-- `VOICE_MEMO_POLL_INTERVAL_SECONDS`: Soniox polling interval, default `2`
+- `VOICE_MEMO_POLL_INTERVAL_SECONDS`: Soniox polling interval, default `2`; ignored by Cohere
 - `VOICE_MEMO_TIMEOUT_SECONDS`: transcription timeout, default `1800`
 
 ## First-Run Behavior
 
-This recorder already contains a large backlog of old recordings. To avoid sending all of them to Soniox on the first automatic sync, the script does this when the cache is empty:
+This recorder already contains a large backlog of old recordings. To avoid sending all of them to the transcription provider on the first automatic sync, the script does this when the cache is empty:
 
 - If the number of unseen recordings is greater than `VOICE_MEMO_BOOTSTRAP_THRESHOLD`, it treats them as existing files and stores them in the cache without transcribing them.
 - If you want the full backlog transcribed anyway, run `uv run voice_memo_sync.py --backfill`.

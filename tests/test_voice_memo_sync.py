@@ -1,13 +1,17 @@
+import os
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from voice_memo_sync import (
     build_recording_fingerprint,
+    extract_cohere_transcript_text,
     discover_recordings,
     format_note_title,
     infer_recorded_at,
+    transcription_provider,
 )
 
 
@@ -53,6 +57,29 @@ class VoiceMemoSyncTests(unittest.TestCase):
                 recordings[0].relative_path.as_posix(), "RECORD/20260328191530.WAV"
             )
             self.assertEqual(recordings[0].note_title, "20260328_191530_voice_memo")
+
+    def test_transcription_provider_defaults_to_cohere(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(transcription_provider(), "cohere")
+
+    def test_transcription_provider_accepts_soniox(self):
+        with patch.dict(
+            os.environ, {"VOICE_MEMO_TRANSCRIPTION_PROVIDER": "soniox"}, clear=True
+        ):
+            self.assertEqual(transcription_provider(), "soniox")
+
+    def test_extract_cohere_transcript_text_reads_text_field(self):
+        payload = {"id": "abc", "text": "hello from cohere"}
+        self.assertEqual(extract_cohere_transcript_text(payload), "hello from cohere")
+
+    def test_extract_cohere_transcript_text_falls_back_to_segments(self):
+        payload = {
+            "segments": [
+                {"text": "hello"},
+                {"text": "world"},
+            ]
+        }
+        self.assertEqual(extract_cohere_transcript_text(payload), "hello world")
 
 
 if __name__ == "__main__":

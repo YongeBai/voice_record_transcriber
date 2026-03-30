@@ -26,7 +26,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 LOG_FILE = SCRIPT_DIR / "voice_memo_sync.log"
 CACHE_FILE = SCRIPT_DIR / ".sync_cache.json"
 LOCK_FILE = SCRIPT_DIR / ".sync.lock"
+COHERE_TRANSCRIPTION_API_URL = "https://api.cohere.com/v2/audio/transcriptions"
 SONIOX_API_BASE_URL = "https://api.soniox.com"
+SUPPORTED_TRANSCRIPTION_PROVIDERS = {"cohere", "soniox"}
 SUPPORTED_AUDIO_EXTENSIONS = {
     ".aac",
     ".aiff",
@@ -40,6 +42,9 @@ SUPPORTED_AUDIO_EXTENSIONS = {
     ".wav",
     ".webm",
 }
+DEFAULT_TRANSCRIPTION_PROVIDER = "cohere"
+DEFAULT_COHERE_MODEL = "cohere-transcribe-03-2026"
+DEFAULT_COHERE_LANGUAGE = "en"
 DEFAULT_NOTE_TAG = "voice-memo"
 DEFAULT_BOOTSTRAP_THRESHOLD = 20
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
@@ -137,6 +142,20 @@ def parse_csv_env(name: str) -> list[str]:
     """Split a comma-separated env var into trimmed values."""
     raw = os.getenv(name, "")
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def transcription_provider() -> str:
+    """Return the configured transcription provider."""
+    provider = os.getenv(
+        "VOICE_MEMO_TRANSCRIPTION_PROVIDER", DEFAULT_TRANSCRIPTION_PROVIDER
+    ).strip().lower()
+    if provider not in SUPPORTED_TRANSCRIPTION_PROVIDERS:
+        supported = ", ".join(sorted(SUPPORTED_TRANSCRIPTION_PROVIDERS))
+        raise RuntimeError(
+            "Unsupported VOICE_MEMO_TRANSCRIPTION_PROVIDER "
+            f"{provider!r}. Expected one of: {supported}."
+        )
+    return provider
 
 
 def get_device_user() -> str:
@@ -307,7 +326,7 @@ def format_note_title(recorded_at: datetime) -> str:
 
 def build_note_content(recording: Recording, transcript_text: str) -> str:
     """Build note content. Simplenote uses the first line as the note title."""
-    safe_transcript = transcript_text.strip() or "[No speech detected by Soniox.]"
+    safe_transcript = transcript_text.strip() or "[No speech detected by the transcriber.]"
     recorded_at = recording.recorded_at.strftime("%Y-%m-%d %H:%M:%S")
     imported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     source_path = recording.relative_path.as_posix()
@@ -352,6 +371,22 @@ def ensure_simplenote():
     return simplenote
 
 
+def new_cohere_session():
+    """Create an authenticated Cohere HTTP session."""
+    requests = ensure_requests()
+    api_key = os.getenv("CO_API_KEY") or os.getenv("COHERE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Missing CO_API_KEY in .env or the environment. "
+            "COHERE_API_KEY is also accepted for compatibility."
+        )
+
+    session = requests.Session()
+    session.headers["Authorization"] = f"Bearer {api_key}"
+    session.headers["Accept"] = "application/json"
+    return session
+
+
 def new_soniox_session():
     """Create an authenticated Soniox HTTP session."""
     requests = ensure_requests()
@@ -362,6 +397,50 @@ def new_soniox_session():
     session = requests.Session()
     session.headers["Authorization"] = f"Bearer {api_key}"
     return session
+
+
+def new_transcription_session(provider: str):
+    """Create an authenticated HTTP session for the selected provider."""
+    if provider == "cohere":
+        return new_cohere_session()
+    if provider == "soniox":
+        return new_soniox_session()
+    raise RuntimeError(f"Unsupported transcription provider: {provider}")
+
+
+def build_cohere_form_data() -> dict[str, str]:
+    """Build the Cohere transcription form payload."""
+    form_data = {"model": os.getenv("COHERE_MODEL", DEFAULT_COHERE_MODEL)}
+    language = os.getenv("COHERE_LANGUAGE", DEFAULT_COHERE_LANGUAGE).strip()
+    if language:
+        form_data["language"] = language
+    return form_data
+
+
+def extract_cohere_transcript_text(payload: dict) -> str:
+    """Extract the transcript text from a Cohere response payload."""
+    for key in ("text", "transcript"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    for key in ("results", "segments", "utterances"):
+        value = payload.get(key)
+        if not isinstance(value, list):
+            continue
+        combined = " ".join(
+            item.get("text", "").strip()
+            for item in value
+            if isinstance(item, dict) and item.get("text")
+        ).strip()
+        if combined:
+            return combined
+
+    available_keys = ", ".join(sorted(payload.keys()))
+    raise RuntimeError(
+        "Cohere transcription response did not include transcript text. "
+        f"Response keys: {available_keys or '[none]'}"
+    )
 
 
 def build_soniox_config(file_id: str, client_reference_id: str) -> dict:
@@ -526,6 +605,26 @@ def delete_uploaded_file(session, file_id: str) -> None:
         response.raise_for_status()
 
 
+def transcribe_with_cohere(session, recording: Recording) -> str:
+    """Upload and transcribe a recording with Cohere."""
+    staged_path: Path | None = None
+
+    try:
+        staged_path = stage_recording_for_upload(recording)
+        with staged_path.open("rb") as file_handle:
+            response = session.post(
+                COHERE_TRANSCRIPTION_API_URL,
+                data=build_cohere_form_data(),
+                files={"file": (staged_path.name, file_handle)},
+                timeout=120,
+            )
+        response.raise_for_status()
+        return extract_cohere_transcript_text(response.json())
+    finally:
+        if staged_path:
+            staged_path.unlink(missing_ok=True)
+
+
 def transcribe_with_soniox(session, recording: Recording) -> str:
     """Upload, transcribe, fetch, and clean up a recording."""
     file_id: str | None = None
@@ -557,6 +656,15 @@ def transcribe_with_soniox(session, recording: Recording) -> str:
                 logger.warning("Failed to delete Soniox file %s: %s", file_id, exc)
         if staged_path:
             staged_path.unlink(missing_ok=True)
+
+
+def transcribe_recording(provider: str, session, recording: Recording) -> str:
+    """Transcribe a recording with the selected provider."""
+    if provider == "cohere":
+        return transcribe_with_cohere(session, recording)
+    if provider == "soniox":
+        return transcribe_with_soniox(session, recording)
+    raise RuntimeError(f"Unsupported transcription provider: {provider}")
 
 
 def new_simplenote_client():
@@ -672,7 +780,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="List what would be transcribed without calling Soniox or Simplenote.",
+        help="List what would be transcribed without calling the transcriber or Simplenote.",
     )
     parser.add_argument(
         "--limit",
@@ -691,6 +799,7 @@ def sync_recordings(args: argparse.Namespace) -> int:
     """Run one sync pass."""
     cache = load_cache(CACHE_FILE)
     recordings = discover_recordings(args.mount_path)
+    provider = transcription_provider()
 
     if not recordings:
         logger.error("Recorder not found or no supported audio files were mounted.")
@@ -709,6 +818,7 @@ def sync_recordings(args: argparse.Namespace) -> int:
 
     logger.info("Found %d mounted recording files.", len(recordings))
     logger.info("Found %d unseen recording files.", len(unseen_recordings))
+    logger.info("Using transcription provider: %s", provider)
 
     if not unseen_recordings:
         logger.info("Nothing to transcribe.")
@@ -764,7 +874,7 @@ def sync_recordings(args: argparse.Namespace) -> int:
             )
             return 0
 
-    soniox_session = new_soniox_session()
+    transcription_session = new_transcription_session(provider)
     simplenote_client = new_simplenote_client()
 
     created_notes = 0
@@ -772,7 +882,9 @@ def sync_recordings(args: argparse.Namespace) -> int:
     for recording in unseen_recordings:
         logger.info("Transcribing %s", recording.file_path)
         try:
-            transcript_text = transcribe_with_soniox(soniox_session, recording)
+            transcript_text = transcribe_recording(
+                provider, transcription_session, recording
+            )
             note = create_simplenote_note(simplenote_client, recording, transcript_text)
             cache["files"][recording.fingerprint] = cache_entry(
                 recording,

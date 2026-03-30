@@ -25,19 +25,16 @@ fi
 
 chmod +x "$SCRIPT_DIR/voice_memo_sync.py"
 chmod +x "$SCRIPT_DIR/install.sh"
+chmod +x "$SCRIPT_DIR/install_auto_sync.sh"
 
 echo
 echo "Install complete."
 echo
 echo "Next steps:"
-echo "1. Edit $SCRIPT_DIR/.env and set your Simplenote and Soniox credentials."
+echo "1. Edit $SCRIPT_DIR/.env and set your Simplenote and transcription credentials."
 echo "2. Optional but recommended: seed the cache with the current recorder contents:"
 echo "   uv run voice_memo_sync.py --mark-existing"
 echo "3. Plug in the recorder and test manually:"
 echo "   uv run voice_memo_sync.py"
 echo "4. Optional automatic sync:"
-echo "   sudo cp $SCRIPT_DIR/99-actions-ami-voice-memo.rules /etc/udev/rules.d/"
-echo "   sudo cp $SCRIPT_DIR/actions-ami-voice-memo@.service /etc/systemd/system/"
-echo "   sudo udevadm control --reload-rules"
-echo "   sudo systemctl daemon-reload"
-echo "   sudo systemctl enable actions-ami-voice-memo@$USER.service"
+echo "   sudo $SCRIPT_DIR/install_auto_sync.sh"

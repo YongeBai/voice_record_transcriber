@@ -1,7 +1,7 @@
 [project]
 name = "voice-record-transcriber"
 version = "0.1.0"
-description = "Transcribe new voice memo files from an Actions Ami MP4 player into Simplenote using Soniox."
+description = "Transcribe new voice memo files from an Actions Ami MP4 player into Simplenote using Cohere or Soniox."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
